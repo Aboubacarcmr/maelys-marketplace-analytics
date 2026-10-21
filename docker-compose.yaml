@@ -1,0 +1,201 @@
+# Maelys Marketplace - ENVIRONNEMENT PEDAGOGIQUE (ne pas exposer en production)
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  image: maelys-airflow:3.1.8
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg://airflow:${AIRFLOW_PASSWORD}@postgres-airflow:5432/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql+psycopg://airflow:${AIRFLOW_PASSWORD}@postgres-airflow:5432/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW_CONN_MARKETPLACE_API: '{"conn_type":"http","host":"http://api-marketplace:5000","password":"${MARKETPLACE_API_TOKEN}"}'
+    AIRFLOW_CONN_POSTGRES_DWH: postgresql://${DWH_USER}:${DWH_PASSWORD}@postgres-dwh:5432/dwh
+    AIRFLOW_CONN_MINIO_S3: '{"conn_type":"aws","login":"${MINIO_ROOT_USER}","password":"${MINIO_ROOT_PASSWORD}","extra":{"endpoint_url":"http://minio:9000","region_name":"us-east-1","config_kwargs":{"s3":{"addressing_style":"path"}}}}'
+    PYTHONPATH: /opt/airflow:/opt/airflow/plugins
+    # Limiter la concurrence pour rester raisonnable dans Codespaces
+    AIRFLOW__CORE__PARALLELISM: '2'
+    AIRFLOW__CELERY__WORKER_CONCURRENCY: '2'
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '2'
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./plugins:/opt/airflow/plugins
+    - ./tests:/opt/airflow/tests
+    - ./sql:/opt/airflow/sql
+    - ./logs:/opt/airflow/logs
+    - ./config:/opt/airflow/config
+  depends_on: &airflow-depends
+    postgres-airflow: {condition: service_healthy}
+    redis: {condition: service_healthy}
+
+services:
+  postgres-airflow:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_PASSWORD}
+      POSTGRES_DB: airflow
+    volumes: ["pg-airflow-data:/var/lib/postgresql"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  postgres-dwh:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ${DWH_USER}
+      POSTGRES_PASSWORD: ${DWH_PASSWORD}
+      POSTGRES_DB: dwh
+    ports: ["127.0.0.1:5433:5432"]
+    volumes:
+      - pg-dwh-data:/var/lib/postgresql
+      - ./init-db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DWH_USER} -d dwh"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  redis:
+    image: redis:7.2-bookworm
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+    volumes: ["minio-data:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-02-08T19-14-21Z
+    depends_on:
+      minio: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD && mc mb --ignore-existing local/data-lake"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
+  api-marketplace:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      MARKETPLACE_API_TOKEN: ${MARKETPLACE_API_TOKEN}
+    ports: ["127.0.0.1:5000:5000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create --username "$${AIRFLOW_ADMIN_USER}" --password "$${AIRFLOW_ADMIN_PASSWORD}" --firstname Admin --lastname Maelys --role Admin --email admin@maelys.local || true
+    environment:
+      <<: *airflow-env
+      AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    depends_on: *airflow-depends
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      <<: *airflow-env
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    depends_on:
+      postgres-airflow: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      airflow-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      postgres-airflow: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      airflow-init: {condition: service_completed_successfully}
+      airflow-apiserver: {condition: service_healthy}
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      postgres-airflow: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      airflow-init: {condition: service_completed_successfully}
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    depends_on:
+      postgres-airflow: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      airflow-init: {condition: service_completed_successfully}
+
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    environment:
+      <<: *airflow-env
+      DUMB_INIT_SETSID: '0'
+    depends_on:
+      postgres-airflow: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      airflow-init: {condition: service_completed_successfully}
+      airflow-apiserver: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
+      postgres-dwh: {condition: service_healthy}
+      api-marketplace: {condition: service_healthy}
+
+  metabase:
+    image: metabase/metabase:v0.59.31.x
+    ports: ["127.0.0.1:3000:3000"]
+    volumes: ["metabase-data:/metabase-data"]
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db
+      JAVA_TOOL_OPTIONS: '-Xmx768m'
+    depends_on:
+      postgres-dwh: {condition: service_healthy}
+
+volumes:
+  pg-airflow-data:
+  pg-dwh-data:
+  minio-data:
+  metabase-data:
