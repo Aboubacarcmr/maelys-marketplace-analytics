@@ -6,4 +6,4 @@ RUN pip install --no-cache-dir \
     'apache-airflow-providers-postgres>=6.0,<7.0' \
     'apache-airflow-providers-fab>=3.0,<4.0' \
     'apache-airflow-providers-amazon>=9.0,<10.0' \
-    'pytest>=8,<10' 'requests>=2.31,<3'
+    'psycopg[binary]>=3.1,<4' 'pytest>=8,<10' 'requests>=2.31,<3'

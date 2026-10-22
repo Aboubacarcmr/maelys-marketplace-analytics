@@ -75,7 +75,7 @@ services:
       retries: 15
 
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z
+    image: docker.io/pgsty/silo:RELEASE.2026-10-18T00-00-00Z
     command: server /data --console-address ':9001'
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -83,17 +83,17 @@ services:
     ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
     volumes: ["minio-data:/data"]
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "silo", "healthcheck", "ready"]
       interval: 10s
       timeout: 5s
       retries: 15
 
   minio-init:
-    image: minio/mc:RELEASE.2025-02-08T19-14-21Z
+    image: docker.io/pgsty/silo:RELEASE.2026-10-18T00-00-00Z
     depends_on:
       minio: {condition: service_healthy}
     entrypoint: ["/bin/sh", "-c"]
-    command: ["mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD && mc mb --ignore-existing local/data-lake"]
+    command: ["mcli alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD && mcli mb --ignore-existing local/data-lake"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
